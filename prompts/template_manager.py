@@ -47,6 +47,8 @@ class TemplateManager:
             "resume_evaluation_system_message": "resume_evaluation_system_message.jinja",
             "job_match": "job_match.jinja",
             "job_match_system_message": "job_match_system_message.jinja",
+            "generate": "generate.jinja",
+            "generate_system_message": "generate_system_message.jinja",
         }
 
         for section_name, filename in template_files.items():

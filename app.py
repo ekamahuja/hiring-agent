@@ -7,6 +7,7 @@ Endpoints:
   POST /scrape-job  (JSON {url|job_id})   -> JobPosting        (LinkedIn, logged-out)
   GET  /search-jobs (?keywords=&location=)-> [JobPosting]
   POST /match       (JSON {resume, job_description}) -> JobMatch
+  POST /generate    (JSON {resume, job_description, outputs}) -> GenerateResult
   GET  /health                            -> liveness
   GET  /ready                             -> readiness (provider configured)
 
@@ -27,12 +28,13 @@ from pydantic import BaseModel
 from urllib.parse import urlparse
 
 from pdf import PDFHandler
-from models import JSONResume, EvaluationData, JobPosting, JobMatch
+from models import JSONResume, EvaluationData, JobPosting, JobMatch, GenerateResult
 from prompt import DEFAULT_MODEL, GEMINI_API_KEY, PROVIDER
 from score import _evaluate_resume, find_profile
 from github import fetch_and_display_github_info
 from linkedin import LinkedInScraper, ScrapeError, JOB_VIEW_URL
 from matcher import JobMatcher
+from generator import DocumentGenerator
 
 logger = logging.getLogger("api")
 
@@ -54,6 +56,7 @@ _scrape_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCRAPE)
 _handler: PDFHandler | None = None
 _scraper: LinkedInScraper | None = None
 _matcher: JobMatcher | None = None
+_generator: DocumentGenerator | None = None
 
 
 def get_handler() -> PDFHandler:
@@ -77,6 +80,14 @@ def get_matcher() -> JobMatcher:
     if _matcher is None:
         _matcher = JobMatcher()
     return _matcher
+
+
+def get_generator() -> DocumentGenerator:
+    """Lazily build one shared DocumentGenerator (it initializes the LLM provider)."""
+    global _generator
+    if _generator is None:
+        _generator = DocumentGenerator()
+    return _generator
 
 
 app = FastAPI(title="Resume Extraction API", version="1.0.0")
@@ -264,6 +275,13 @@ class MatchRequest(BaseModel):
     job_description: str
 
 
+class GenerateRequest(BaseModel):
+    resume: JSONResume
+    job_description: str
+    # Which documents to draft: any of "cover", "statement".
+    outputs: list[str] = ["cover"]
+
+
 def _validate_linkedin_url(url: str) -> None:
     host = (urlparse(url).hostname or "").lower()
     if not (host == "linkedin.com" or host.endswith(".linkedin.com")):
@@ -313,6 +331,28 @@ async def match(req: MatchRequest):
     except Exception as e:
         logger.exception("match failed")
         raise ApiError(502, "match_failed", f"LLM match failed: {e}")
+
+
+@app.post("/generate", response_model=GenerateResult)
+async def generate(req: GenerateRequest):
+    outputs = [o for o in req.outputs if o in ("cover", "statement")]
+    if not outputs:
+        raise ApiError(
+            400, "invalid_outputs", "outputs must include 'cover' and/or 'statement'"
+        )
+    if not (req.job_description or "").strip():
+        raise ApiError(400, "empty_job_description", "job_description is required")
+    try:
+        async with _semaphore:  # LLM-bound -> share the extraction/scoring cap
+            return await asyncio.to_thread(
+                get_generator().generate,
+                req.resume.model_dump_json(),
+                req.job_description,
+                outputs,
+            )
+    except Exception as e:
+        logger.exception("generate failed")
+        raise ApiError(502, "generation_failed", f"LLM generation failed: {e}")
 
 
 if __name__ == "__main__":

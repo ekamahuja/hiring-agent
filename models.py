@@ -276,6 +276,19 @@ class JobMatch(BaseModel):
     summary: str = Field(min_length=1, description="One-paragraph fit summary")
 
 
+class GenerateResult(BaseModel):
+    """LLM-drafted application document(s) for a resume + job description."""
+
+    company: str = Field(min_length=1, description="Hiring company parsed from the JD")
+    role: str = Field(min_length=1, description="Job title parsed from the JD")
+    cover_letter: Optional[str] = Field(
+        default=None, description="Full cover letter, or null if not requested"
+    )
+    suitability_statement: Optional[str] = Field(
+        default=None, description="Suitability statement, or null if not requested"
+    )
+
+
 class GitHubProfile(BaseModel):
     """Pydantic model for GitHub profile data."""
 

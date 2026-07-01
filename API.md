@@ -120,6 +120,25 @@ curl -H "Content-Type: application/json" \
   http://localhost:8000/match
 ```
 
+### `POST /generate`
+Draft job-application document(s) from a resume + job description (single LLM
+call). Pair with `/extract` (resume → `JSONResume`) and `/scrape-job` (job →
+`description`).
+
+- Body: `application/json`,
+  `{ "resume": JSONResume, "job_description": "...", "outputs": ["cover","statement"] }`.
+  `outputs` selects which documents to draft — any of `"cover"`, `"statement"`
+  (defaults to `["cover"]`). Unknown values are ignored; an empty effective set
+  is a `400 invalid_outputs`.
+- → `200` with a **`GenerateResult`** object. `company`/`role` are parsed from the
+  JD; each document field is populated only when requested (otherwise `null`).
+
+```bash
+curl -H "Content-Type: application/json" \
+  -d '{"resume": {"basics": {"name": "Jane"}}, "job_description": "...", "outputs": ["cover","statement"]}' \
+  http://localhost:8000/generate
+```
+
 > **Scraping is best-effort.** LinkedIn changes markup and rate-limits bursts.
 > `scrape_failed` means the markup drifted or a login wall was served; empty
 > fields or repeated 429s are the signal to add proxies / switch Scrapling to
@@ -147,6 +166,9 @@ Non-2xx responses share this shape:
 | 404 | `job_not_found` | LinkedIn returned 404 for the job |
 | 502 | `scrape_failed` | markup drift / login wall / repeated 429–5xx from LinkedIn |
 | 502 | `match_failed` | `/match` LLM call failed |
+| 400 | `invalid_outputs` | `/generate` given no valid `outputs` (need `cover`/`statement`) |
+| 400 | `empty_job_description` | `/generate` given a blank `job_description` |
+| 502 | `generation_failed` | `/generate` LLM call failed |
 | 500 | `internal_error` | unexpected |
 
 ## Response schemas
@@ -218,6 +240,17 @@ Final score is computed from these by the caller (see `evaluator.py` constants:
   "strengths": ["...", "..."],     // 1–5 items
   "gaps": ["...", "..."],          // 1–5 items
   "summary": "One paragraph explaining the score."
+}
+```
+
+### `GenerateResult`
+
+```jsonc
+{
+  "company": "Acme Corp",              // parsed from the JD
+  "role": "Backend Engineer",          // parsed from the JD
+  "cover_letter": "Dear ...",          // null unless "cover" was requested
+  "suitability_statement": "I ..."     // null unless "statement" was requested
 }
 ```
 
