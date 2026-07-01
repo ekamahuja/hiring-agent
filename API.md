@@ -31,7 +31,8 @@ docker run -p 8000:8000 -e GEMINI_API_KEY=... hiring-agent-api
 | `PORT` | `8000` | |
 | `MAX_UPLOAD_MB` | `10` | Upload size limit |
 | `MAX_PAGES` | `15` | Page-count limit |
-| `MAX_CONCURRENT_EXTRACTIONS` | `4` | Global cap on in-flight LLM requests |
+| `MAX_CONCURRENT_EXTRACTIONS` | `4` | Global cap on in-flight LLM requests (extract/score/match) |
+| `MAX_CONCURRENT_SCRAPE` | `2` | Global cap on in-flight LinkedIn scrapes (be polite; avoid 429s) |
 
 ## Endpoints
 
@@ -80,6 +81,50 @@ One-shot: PDF → extract → GitHub enrich → score.
 curl -F "file=@resume.pdf" http://localhost:8000/process
 ```
 
+### `POST /scrape-job`
+Scrape one LinkedIn job posting from the **logged-out (guest) endpoints** — no
+auth, no cookies.
+
+- Body: `application/json`, `{ "url": "https://www.linkedin.com/jobs/view/<id>" }`
+  or `{ "job_id": "<numeric id>" }`. When `url` is given, its host must be
+  `linkedin.com`.
+- → `200` with a **`JobPosting`** object.
+
+```bash
+curl -H "Content-Type: application/json" \
+  -d '{"url":"https://www.linkedin.com/jobs/view/3812345678"}' \
+  http://localhost:8000/scrape-job
+```
+
+### `GET /search-jobs`
+Search jobs via the guest search endpoint. Returns summary cards (no full
+description — call `/scrape-job` for the details of a specific posting).
+
+- Query: `keywords` (required), `location` (default `""`), `start` (default `0`, page offset).
+- → `200` with a list of **`JobPosting`** objects (`description`/`seniority`/`employment_type` are `null`).
+
+```bash
+curl "http://localhost:8000/search-jobs?keywords=backend%20engineer&location=Remote"
+```
+
+### `POST /match`
+Score how well a resume fits a job description (single LLM call). Pair with
+`/extract` (resume → `JSONResume`) and `/scrape-job` (job → `description`).
+
+- Body: `application/json`, `{ "resume": JSONResume, "job_description": "..." }`.
+- → `200` with a **`JobMatch`** object.
+
+```bash
+curl -H "Content-Type: application/json" \
+  -d '{"resume": {"basics": {"name": "Jane"}}, "job_description": "..."}' \
+  http://localhost:8000/match
+```
+
+> **Scraping is best-effort.** LinkedIn changes markup and rate-limits bursts.
+> `scrape_failed` means the markup drifted or a login wall was served; empty
+> fields or repeated 429s are the signal to add proxies / switch Scrapling to
+> `StealthyFetcher` (see [`linkedin.py`](linkedin.py)).
+
 ## Errors
 
 Non-2xx responses share this shape:
@@ -98,6 +143,10 @@ Non-2xx responses share this shape:
 | 413 | `file_too_large` | exceeds `MAX_UPLOAD_MB` |
 | 422 | `extraction_failed` | pipeline produced no usable resume (e.g. LLM/quota failure during extraction) |
 | 502 | `scoring_failed` | evaluation LLM call failed |
+| 400 | `invalid_url` | `/scrape-job` given no `url`/`job_id`, or a non-`linkedin.com` URL |
+| 404 | `job_not_found` | LinkedIn returned 404 for the job |
+| 502 | `scrape_failed` | markup drift / login wall / repeated 429–5xx from LinkedIn |
+| 502 | `match_failed` | `/match` LLM call failed |
 | 500 | `internal_error` | unexpected |
 
 ## Response schemas
@@ -144,6 +193,33 @@ resume lacks is `null`).
 
 Final score is computed from these by the caller (see `evaluator.py` constants:
 `MIN_FINAL_SCORE=-20`, `MAX_FINAL_SCORE=120`, `MAX_BONUS_POINTS=20`).
+
+### `JobPosting`
+
+```jsonc
+{
+  "linkedin_job_id": "3812345678",
+  "url": "https://www.linkedin.com/jobs/view/3812345678",
+  "title": "Backend Engineer",
+  "company": "Acme Corp",
+  "location": "Remote, United States",   // nullable
+  "posted_date": "2026-06-25",           // nullable (ISO date or "1 week ago")
+  "description": "...",                   // nullable; null in /search-jobs results
+  "seniority": "Mid-Senior level",        // nullable
+  "employment_type": "Full-time"          // nullable
+}
+```
+
+### `JobMatch`
+
+```jsonc
+{
+  "fit_score": 82,                 // 0–100
+  "strengths": ["...", "..."],     // 1–5 items
+  "gaps": ["...", "..."],          // 1–5 items
+  "summary": "One paragraph explaining the score."
+}
+```
 
 ## Notes for the next agent
 

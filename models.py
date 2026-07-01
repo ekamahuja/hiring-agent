@@ -19,7 +19,7 @@ class LLMProvider(Protocol):
         model: str,
         messages: List[Dict[str, str]],
         options: Dict[str, Any] = None,
-        **kwargs
+        **kwargs,
     ) -> Dict[str, Any]:
         """Send a chat request to the LLM provider."""
         ...
@@ -249,6 +249,33 @@ class EvaluationData(BaseModel):
     areas_for_improvement: List[str] = Field(min_items=1, max_items=5)
 
 
+class JobPosting(BaseModel):
+    """A LinkedIn job posting scraped from the public (logged-out) guest endpoints."""
+
+    linkedin_job_id: str
+    url: str
+    title: str
+    company: str
+    location: Optional[str] = None
+    posted_date: Optional[str] = None
+    description: Optional[str] = None
+    seniority: Optional[str] = None
+    employment_type: Optional[str] = None
+
+
+class JobMatch(BaseModel):
+    """LLM assessment of how well a resume fits a job description."""
+
+    fit_score: float = Field(ge=0, le=100, description="Overall fit, 0-100")
+    strengths: List[str] = Field(
+        min_items=1, max_items=5, description="Where the candidate matches the role"
+    )
+    gaps: List[str] = Field(
+        min_items=1, max_items=5, description="Where the candidate falls short"
+    )
+    summary: str = Field(min_length=1, description="One-paragraph fit summary")
+
+
 class GitHubProfile(BaseModel):
     """Pydantic model for GitHub profile data."""
 
@@ -281,7 +308,7 @@ class OllamaProvider:
         model: str,
         messages: List[Dict[str, str]],
         options: Dict[str, Any] = None,
-        **kwargs
+        **kwargs,
     ) -> Dict[str, Any]:
         """Send a chat request to Ollama."""
 
@@ -324,7 +351,7 @@ class GeminiProvider:
         model: str,
         messages: List[Dict[str, str]],
         options: Dict[str, Any] = None,
-        **kwargs
+        **kwargs,
     ) -> Dict[str, Any]:
         """Send a chat request to Google Gemini API."""
         import re
@@ -375,7 +402,7 @@ class GeminiProvider:
                 api_hint = float(match.group(1)) if match else None
 
                 # Exponential backoff: BASE_DELAY * 2^attempt, capped at MAX_DELAY
-                exp_delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+                exp_delay = min(BASE_DELAY * (2**attempt), MAX_DELAY)
 
                 # Prefer the API hint when it is shorter than our computed delay
                 delay = api_hint if (api_hint and api_hint < exp_delay) else exp_delay

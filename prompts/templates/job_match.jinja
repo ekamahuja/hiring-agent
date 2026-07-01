@@ -1,0 +1,23 @@
+Assess how well the following candidate fits the job below.
+
+Return a JSON object with this EXACT structure (all fields required):
+
+{
+    "fit_score": 0,
+    "strengths": ["string"],
+    "gaps": ["string"],
+    "summary": "string"
+}
+
+Constraints:
+- fit_score: a number from 0 to 100 (0 = no fit, 100 = ideal fit)
+- strengths: 1-5 items, each a specific reason the candidate matches this role
+- gaps: 1-5 items, each a specific required skill or experience the resume does not evidence
+- summary: one paragraph explaining the score
+- Do not add any other fields.
+
+=== JOB DESCRIPTION ===
+{{ job_description }}
+
+=== CANDIDATE RESUME (JSON Resume format) ===
+{{ resume_text }}

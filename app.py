@@ -3,7 +3,10 @@
 Endpoints:
   POST /extract  (multipart pdf)          -> JSONResume        (optional ?include_markdown=true)
   POST /score    (JSON JSONResume body)   -> EvaluationData
-  POST /process  (multipart pdf)          -> {resume, evaluation}
+  POST /process     (multipart pdf)       -> {resume, evaluation}
+  POST /scrape-job  (JSON {url|job_id})   -> JobPosting        (LinkedIn, logged-out)
+  GET  /search-jobs (?keywords=&location=)-> [JobPosting]
+  POST /match       (JSON {resume, job_description}) -> JobMatch
   GET  /health                            -> liveness
   GET  /ready                             -> readiness (provider configured)
 
@@ -20,12 +23,16 @@ import logging
 import pymupdf
 from fastapi import FastAPI, File, UploadFile, Request, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from urllib.parse import urlparse
 
 from pdf import PDFHandler
-from models import JSONResume, EvaluationData
+from models import JSONResume, EvaluationData, JobPosting, JobMatch
 from prompt import DEFAULT_MODEL, GEMINI_API_KEY, PROVIDER
 from score import _evaluate_resume, find_profile
 from github import fetch_and_display_github_info
+from linkedin import LinkedInScraper, ScrapeError, JOB_VIEW_URL
+from matcher import JobMatcher
 
 logger = logging.getLogger("api")
 
@@ -33,12 +40,20 @@ logger = logging.getLogger("api")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "15"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_EXTRACTIONS", "4"))
+MAX_CONCURRENT_SCRAPE = int(os.getenv("MAX_CONCURRENT_SCRAPE", "2"))
 
 # ponytail: one global semaphore caps concurrent LLM-bound requests so we don't
 # blow Gemini quota. Per-key limits only if this ever goes multi-tenant.
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
+# ponytail: separate, tighter cap for scraping — it's network I/O against
+# LinkedIn (not LLM-bound) and being polite avoids rate-limit blocks. Merge with
+# _semaphore only if they ever need a shared limit.
+_scrape_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCRAPE)
+
 _handler: PDFHandler | None = None
+_scraper: LinkedInScraper | None = None
+_matcher: JobMatcher | None = None
 
 
 def get_handler() -> PDFHandler:
@@ -47,6 +62,21 @@ def get_handler() -> PDFHandler:
     if _handler is None:
         _handler = PDFHandler()
     return _handler
+
+
+def get_scraper() -> LinkedInScraper:
+    global _scraper
+    if _scraper is None:
+        _scraper = LinkedInScraper()
+    return _scraper
+
+
+def get_matcher() -> JobMatcher:
+    """Lazily build one shared JobMatcher (it initializes the LLM provider)."""
+    global _matcher
+    if _matcher is None:
+        _matcher = JobMatcher()
+    return _matcher
 
 
 app = FastAPI(title="Resume Extraction API", version="1.0.0")
@@ -105,7 +135,8 @@ async def _request_context(request: Request, call_next):
 async def _read_validated_pdf(file: UploadFile) -> bytes:
     if file.content_type not in ("application/pdf", "application/octet-stream", None):
         raise ApiError(
-            400, "invalid_content_type",
+            400,
+            "invalid_content_type",
             f"Expected application/pdf, got {file.content_type}",
         )
     data = await file.read()
@@ -114,7 +145,8 @@ async def _read_validated_pdf(file: UploadFile) -> bytes:
     size_mb = len(data) / (1024 * 1024)
     if size_mb > MAX_UPLOAD_MB:
         raise ApiError(
-            413, "file_too_large",
+            413,
+            "file_too_large",
             f"File is {size_mb:.1f}MB; limit is {MAX_UPLOAD_MB}MB",
         )
     if not data.startswith(b"%PDF"):
@@ -149,7 +181,8 @@ async def _extract(data: bytes) -> JSONResume:
         resume = await asyncio.to_thread(get_handler().extract_json_from_pdf, data)
     if resume is None:
         raise ApiError(
-            422, "extraction_failed",
+            422,
+            "extraction_failed",
             "Could not extract a valid resume from the PDF",
         )
     return resume
@@ -178,7 +211,8 @@ async def health():
 async def ready():
     if PROVIDER == "gemini" and not GEMINI_API_KEY:
         raise ApiError(
-            503, "not_ready",
+            503,
+            "not_ready",
             "LLM_PROVIDER=gemini but GEMINI_API_KEY is not set",
         )
     return {"status": "ready", "provider": PROVIDER, "model": DEFAULT_MODEL}
@@ -197,12 +231,11 @@ async def extract(
     if not markdown:
         raise ApiError(422, "extraction_failed", "Could not extract text from the PDF")
     async with _semaphore:
-        resume = await asyncio.to_thread(
-            get_handler().extract_json_from_text, markdown
-        )
+        resume = await asyncio.to_thread(get_handler().extract_json_from_text, markdown)
     if resume is None:
         raise ApiError(
-            422, "extraction_failed",
+            422,
+            "extraction_failed",
             "Could not extract a valid resume from the PDF",
         )
     return {"resume": resume, "markdown": markdown}
@@ -219,6 +252,67 @@ async def process(file: UploadFile = File(...)):
     resume = await _extract(data)
     evaluation = await _score(resume)
     return {"resume": resume, "evaluation": evaluation}
+
+
+class ScrapeJobRequest(BaseModel):
+    url: str | None = None
+    job_id: str | None = None
+
+
+class MatchRequest(BaseModel):
+    resume: JSONResume
+    job_description: str
+
+
+def _validate_linkedin_url(url: str) -> None:
+    host = (urlparse(url).hostname or "").lower()
+    if not (host == "linkedin.com" or host.endswith(".linkedin.com")):
+        raise ApiError(
+            400, "invalid_url", f"URL host must be linkedin.com, got '{host or url}'"
+        )
+
+
+@app.post("/scrape-job", response_model=JobPosting)
+async def scrape_job(req: ScrapeJobRequest):
+    if req.url:
+        _validate_linkedin_url(req.url)
+        target = req.url
+    elif req.job_id:
+        target = JOB_VIEW_URL.format(job_id=req.job_id)
+    else:
+        raise ApiError(400, "invalid_url", "Provide either 'url' or 'job_id'")
+    try:
+        async with _scrape_semaphore:
+            return await asyncio.to_thread(get_scraper().fetch_job, target)
+    except ScrapeError as e:
+        raise ApiError(e.status, e.code, e.detail)
+
+
+@app.get("/search-jobs", response_model=list[JobPosting])
+async def search_jobs(
+    keywords: str = Query(..., min_length=1),
+    location: str = Query(""),
+    start: int = Query(0, ge=0),
+):
+    try:
+        async with _scrape_semaphore:
+            return await asyncio.to_thread(
+                get_scraper().search, keywords, location, start
+            )
+    except ScrapeError as e:
+        raise ApiError(e.status, e.code, e.detail)
+
+
+@app.post("/match", response_model=JobMatch)
+async def match(req: MatchRequest):
+    try:
+        async with _semaphore:  # LLM-bound -> share the extraction/scoring cap
+            return await asyncio.to_thread(
+                get_matcher().match, req.resume.model_dump_json(), req.job_description
+            )
+    except Exception as e:
+        logger.exception("match failed")
+        raise ApiError(502, "match_failed", f"LLM match failed: {e}")
 
 
 if __name__ == "__main__":
