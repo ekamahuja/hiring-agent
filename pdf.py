@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import pymupdf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models import (
     JSONResume,
@@ -44,12 +45,16 @@ class PDFHandler:
         """Initialize the appropriate LLM provider based on the model."""
         self.provider = initialize_llm_provider(DEFAULT_MODEL)
 
-    def extract_text_from_pdf(self, pdf_path: str) -> Optional[str]:
+    def extract_text_from_pdf(self, pdf_input: "str | bytes") -> Optional[str]:
         try:
-            if not os.path.exists(pdf_path):
-                raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+            if isinstance(pdf_input, bytes):
+                doc_ctx = pymupdf.open(stream=pdf_input, filetype="pdf")
+            else:
+                if not os.path.exists(pdf_input):
+                    raise FileNotFoundError(f"PDF file not found: {pdf_input}")
+                doc_ctx = pymupdf.open(pdf_input)
 
-            with pymupdf.open(pdf_path) as doc:
+            with doc_ctx as doc:
                 pages = range(doc.page_count)
                 resume_text = to_markdown(
                     doc,
@@ -196,10 +201,12 @@ class PDFHandler:
             logger.error(f"Error calling Ollama: {e}")
             return None
 
-    def extract_json_from_pdf(self, pdf_path: str) -> Optional[JSONResume]:
+    def extract_json_from_pdf(
+        self, pdf_input: "str | bytes"
+    ) -> Optional[JSONResume]:
         try:
-            logger.debug(f"📄 Extracting text from PDF: {pdf_path}")
-            text_content = self.extract_text_from_pdf(pdf_path)
+            logger.debug("📄 Extracting text from PDF")
+            text_content = self.extract_text_from_pdf(pdf_input)
 
             if not text_content:
                 logger.error("❌ Failed to extract text from PDF")
@@ -286,17 +293,27 @@ class PDFHandler:
             "meta": None,
         }
 
-        for section_name in sections:
-            section_data = self._extract_section_data(text_content, section_name)
-
-            if section_data:
-                complete_resume.update(section_data)
-                logger.debug(f"✅ Successfully extracted {section_name} section")
-            else:
-                logger.error(
-                    f"⚠️ Failed to extract {section_name} section. Aborting extraction to prevent partial/invalid resume data."
-                )
-                return None
+        # ponytail: run the 6 independent section calls concurrently instead of
+        # sequentially — cuts a cold Gemini run ~5x. Ceiling is 6 concurrent
+        # calls; overall request concurrency is capped by the API-layer semaphore.
+        with ThreadPoolExecutor(max_workers=len(sections)) as executor:
+            future_to_section = {
+                executor.submit(
+                    self._extract_section_data, text_content, section_name
+                ): section_name
+                for section_name in sections
+            }
+            for future in as_completed(future_to_section):
+                section_name = future_to_section[future]
+                section_data = future.result()
+                if section_data:
+                    complete_resume.update(section_data)
+                    logger.debug(f"✅ Successfully extracted {section_name} section")
+                else:
+                    logger.error(
+                        f"⚠️ Failed to extract {section_name} section. Aborting extraction to prevent partial/invalid resume data."
+                    )
+                    return None
 
         try:
             if complete_resume.get("basics") and isinstance(
