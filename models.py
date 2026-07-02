@@ -383,17 +383,35 @@ class GeminiProvider:
                 generation_config["temperature"] = options["temperature"]
             if "top_p" in options:
                 generation_config["top_p"] = options["top_p"]
+        # A `format` schema means the caller wants structured JSON. Force valid
+        # JSON output so we don't depend on prompt-wishing + markdown stripping.
+        # ponytail: response_mime_type guarantees parseable JSON; passing the
+        # pydantic schema as response_schema needs $ref flattening first — add
+        # that only if the model ever returns valid-JSON-but-wrong-shape.
+        if kwargs.get("format"):
+            generation_config["response_mime_type"] = "application/json"
+
+        # Gemini has a dedicated system slot. The old code folded the system
+        # turn in as a "model" message — telling Gemini it had authored the
+        # instructions itself. Pull system turns out into system_instruction.
+        system_instruction = (
+            "\n\n".join(m["content"] for m in messages if m["role"] == "system") or None
+        )
+        gemini_messages = [
+            {
+                "role": "user" if m["role"] == "user" else "model",
+                "parts": [m["content"]],
+            }
+            for m in messages
+            if m["role"] != "system"
+        ]
 
         # Create a Gemini model
         gemini_model = self.client.GenerativeModel(
-            model_name=model, generation_config=generation_config
+            model_name=model,
+            generation_config=generation_config,
+            system_instruction=system_instruction,
         )
-
-        # Convert messages to Gemini format
-        gemini_messages = []
-        for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            gemini_messages.append({"role": role, "parts": [msg["content"]]})
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -429,3 +447,6 @@ class GeminiProvider:
                     f"Retrying in {sleep_time}s..."
                 )
                 time.sleep(sleep_time)
+
+        # Unreachable: the final attempt either returns or re-raises above.
+        raise RuntimeError("GeminiProvider.chat exhausted retries without returning")

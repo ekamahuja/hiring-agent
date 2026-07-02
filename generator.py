@@ -4,11 +4,10 @@ One LLM call returns company + role parsed from the JD plus whichever documents
 were requested (the others come back null).
 """
 
-import json
 import logging
 
 from models import GenerateResult
-from llm_utils import initialize_llm_provider, extract_json_from_response
+from llm_utils import initialize_llm_provider, structured_chat
 from prompt import DEFAULT_MODEL, MODEL_PARAMETERS
 from prompts.template_manager import TemplateManager
 
@@ -43,20 +42,12 @@ class DocumentGenerator:
         if system_message is None or prompt is None:
             raise ValueError("Failed to load generation templates")
 
-        chat_params = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt},
-            ],
-            "options": {
-                "stream": False,
-                "temperature": self.model_params.get("temperature", 0.4),
-                "top_p": self.model_params.get("top_p", 0.9),
-            },
-        }
-        kwargs = {"format": GenerateResult.model_json_schema()}
-
-        response = self.provider.chat(**chat_params, **kwargs)
-        response_text = extract_json_from_response(response["message"]["content"])
-        return GenerateResult(**json.loads(response_text))
+        data = structured_chat(
+            self.provider,
+            self.model_name,
+            system_message,
+            prompt,
+            GenerateResult.model_json_schema(),
+            self.model_params,
+        )
+        return GenerateResult(**data)

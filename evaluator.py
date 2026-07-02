@@ -1,10 +1,8 @@
 from typing import Dict, List, Optional, Tuple, Any
 from pydantic import BaseModel, Field, field_validator
 from models import JSONResume, EvaluationData
-from llm_utils import initialize_llm_provider, extract_json_from_response
+from llm_utils import initialize_llm_provider, structured_chat
 import logging
-import json
-import re
 
 MAX_BONUS_POINTS = 20
 MIN_FINAL_SCORE = -20
@@ -48,7 +46,6 @@ class ResumeEvaluator:
     def evaluate_resume(self, resume_text: str) -> EvaluationData:
         self._last_resume_text = resume_text
         full_prompt = self._load_evaluation_prompt(resume_text)
-        # logger.info(f"🔤 Evaluation prompt being sent: {full_prompt}")
         try:
             system_message = self.template_manager.render_template(
                 "resume_evaluation_system_message"
@@ -58,33 +55,15 @@ class ResumeEvaluator:
                     "Failed to load resume evaluation system message template"
                 )
 
-            # Prepare chat parameters
-            chat_params = {
-                "model": self.model_name,
-                "messages": [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": full_prompt},
-                ],
-                "options": {
-                    "stream": False,
-                    "temperature": self.model_params.get("temperature", 0.5),
-                    "top_p": self.model_params.get("top_p", 0.9),
-                },
-            }
-
-            # Add format parameter for structured output
-            kwargs = {"format": EvaluationData.model_json_schema()}
-            # Use the appropriate provider to make the API call
-            response = self.provider.chat(**chat_params, **kwargs)
-
-            response_text = response["message"]["content"]
-            response_text = extract_json_from_response(response_text)
-            logger.error(f"🔤 Prompt response: {response_text}")
-
-            evaluation_dict = json.loads(response_text)
-            evaluation_data = EvaluationData(**evaluation_dict)
-
-            return evaluation_data
+            data = structured_chat(
+                self.provider,
+                self.model_name,
+                system_message,
+                full_prompt,
+                EvaluationData.model_json_schema(),
+                self.model_params,
+            )
+            return EvaluationData(**data)
 
         except Exception as e:
             logger.error(f"Error evaluating resume: {str(e)}")

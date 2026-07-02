@@ -2,12 +2,43 @@
 Utility functions for LLM providers.
 """
 
+import json
 import logging
 from typing import Any, Dict, Optional
 from models import ModelProvider, OllamaProvider, GeminiProvider
 from prompt import MODEL_PROVIDER_MAPPING, GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
+
+
+def structured_chat(
+    provider: Any,
+    model: str,
+    system_message: str,
+    prompt: str,
+    schema: Dict[str, Any],
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One structured-JSON chat round-trip (system + user turn -> parsed dict).
+
+    Shared by the matcher, generator, and evaluator, which previously each
+    re-implemented the same provider.chat + extract + json.loads dance. Callers
+    validate the returned dict into their own Pydantic model.
+    """
+    response = provider.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ],
+        options={
+            "stream": False,
+            "temperature": params.get("temperature", 0.3),
+            "top_p": params.get("top_p", 0.9),
+        },
+        format=schema,
+    )
+    return json.loads(extract_json_from_response(response["message"]["content"]))
 
 
 def extract_json_from_response(response_text: str) -> str:

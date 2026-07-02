@@ -22,7 +22,7 @@ from models import (
     AwardsSection,
 )
 from llm_utils import initialize_llm_provider, extract_json_from_response
-from pymupdf_rag import to_markdown
+from pymupdf4llm import to_markdown
 from typing import List, Optional, Dict, Any
 from prompt import (
     DEFAULT_MODEL,
@@ -201,9 +201,7 @@ class PDFHandler:
             logger.error(f"Error calling Ollama: {e}")
             return None
 
-    def extract_json_from_pdf(
-        self, pdf_input: "str | bytes"
-    ) -> Optional[JSONResume]:
+    def extract_json_from_pdf(self, pdf_input: "str | bytes") -> Optional[JSONResume]:
         try:
             logger.debug("📄 Extracting text from PDF")
             text_content = self.extract_text_from_pdf(pdf_input)

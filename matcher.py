@@ -2,11 +2,10 @@
 same provider init, template rendering, and structured-JSON extraction path.
 """
 
-import json
 import logging
 
 from models import JobMatch
-from llm_utils import initialize_llm_provider, extract_json_from_response
+from llm_utils import initialize_llm_provider, structured_chat
 from prompt import DEFAULT_MODEL, MODEL_PARAMETERS
 from prompts.template_manager import TemplateManager
 
@@ -34,20 +33,12 @@ class JobMatcher:
         if system_message is None or prompt is None:
             raise ValueError("Failed to load job match templates")
 
-        chat_params = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt},
-            ],
-            "options": {
-                "stream": False,
-                "temperature": self.model_params.get("temperature", 0.3),
-                "top_p": self.model_params.get("top_p", 0.9),
-            },
-        }
-        kwargs = {"format": JobMatch.model_json_schema()}
-
-        response = self.provider.chat(**chat_params, **kwargs)
-        response_text = extract_json_from_response(response["message"]["content"])
-        return JobMatch(**json.loads(response_text))
+        data = structured_chat(
+            self.provider,
+            self.model_name,
+            system_message,
+            prompt,
+            JobMatch.model_json_schema(),
+            self.model_params,
+        )
+        return JobMatch(**data)
