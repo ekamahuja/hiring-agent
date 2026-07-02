@@ -16,16 +16,25 @@ Constraints:
 - company: the hiring company, parsed from the job description (best inference if implicit).
 - role: the job title, parsed from the job description.
 {% if want_cover %}
-- cover_letter: a complete cover letter in the candidate's first-person voice — 3 to 4 short paragraphs, addressed to the hiring team, naming the role and company, evidencing fit with specific quantified wins drawn from the resume, and closing with a call to action. Plain text; separate paragraphs with a blank line. Sign off with the candidate's real name from the resume — never a placeholder like [Your Name].
+- cover_letter: a complete cover letter in the candidate's first-person voice — {{ cover_shape }}, addressed to the hiring team, naming the role and company, evidencing fit with specific quantified wins drawn from the resume, and closing with a call to action. Plain text; separate paragraphs with a blank line. Sign off with the candidate's real name from the resume — never a placeholder like [Your Name].
 {% else %}
 - cover_letter: return null (not requested).
 {% endif %}
 {% if want_statement %}
-- suitability_statement: a concise suitability statement (roughly 120–200 words) in the candidate's first-person voice, tying their experience directly to this role's key requirements. Plain text, no salutation or sign-off.
+- suitability_statement: a suitability statement ({{ statement_shape }}) in the candidate's first-person voice, tying their experience directly to this role's key requirements. Plain text, no salutation or sign-off.
 {% else %}
 - suitability_statement: return null (not requested).
 {% endif %}
 - Do not add any other fields.
+
+=== HOW TO WRITE (applies to every requested document) ===
+- Tone: {{ tone_line }}
+{% if emphasis_lines %}
+- Emphasize, in priority order: {{ emphasis_lines }}. Give these the most weight while staying truthful to the resume.
+{% endif %}
+{% if note %}
+- The candidate specifically asked: "{{ note }}". Honor this only if it is truthful and relevant; never fabricate to satisfy it.
+{% endif %}
 
 === JOB DESCRIPTION ===
 {{ job_description }}

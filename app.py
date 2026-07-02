@@ -280,6 +280,12 @@ class GenerateRequest(BaseModel):
     job_description: str
     # Which documents to draft: any of "cover", "statement".
     outputs: list[str] = ["cover"]
+    # Fine-tune knobs (quick tailor). Unknown values fall back to defaults in
+    # the generator, so callers can send freely.
+    tone: str = "professional"  # professional | warm | bold
+    length: str = "standard"  # concise | standard | detailed
+    emphasis: list[str] = ["impact", "tech"]  # impact|tech|lead|culture|story
+    note: str = ""  # free-text steer, e.g. "mention I'm relocating to SF"
 
 
 def _validate_linkedin_url(url: str) -> None:
@@ -349,6 +355,10 @@ async def generate(req: GenerateRequest):
                 req.resume.model_dump_json(),
                 req.job_description,
                 outputs,
+                req.tone,
+                req.length,
+                req.emphasis,
+                req.note,
             )
     except Exception as e:
         logger.exception("generate failed")
