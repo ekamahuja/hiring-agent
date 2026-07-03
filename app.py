@@ -238,10 +238,13 @@ async def extract(
     if not include_markdown:
         return await _extract(data)
 
-    markdown = await asyncio.to_thread(get_handler().extract_text_from_pdf, data)
-    if not markdown:
-        raise ApiError(422, "extraction_failed", "Could not extract text from the PDF")
+    # Hold the semaphore across BOTH the PDF render and the LLM call — pymupdf
+    # rendering every page is the memory-heavy step, and the include_markdown=false
+    # path already caps it (extract_json_from_pdf renders under the same lock).
     async with _semaphore:
+        markdown = await asyncio.to_thread(get_handler().extract_text_from_pdf, data)
+        if not markdown:
+            raise ApiError(422, "extraction_failed", "Could not extract text from the PDF")
         resume = await asyncio.to_thread(get_handler().extract_json_from_text, markdown)
     if resume is None:
         raise ApiError(
