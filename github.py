@@ -5,6 +5,7 @@ import requests
 import datetime
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from typing import Dict, List, Optional, Any
 from models import GitHubProfile
@@ -229,14 +230,30 @@ def fetch_all_github_repos(github_url: str, max_repos: int = 100) -> List[Dict]:
         status_code, repos_data = _fetch_github_api(api_url, params=params)
 
         if status_code == 200:
+            # Repos worth scoring — skip low-value forks up front so we only
+            # spend GitHub requests on the ones we keep.
+            candidate_repos = [
+                repo
+                for repo in repos_data
+                if not (repo.get("fork") and repo.get("forks_count", 0) < 5)
+            ]
+
+            # ponytail: contributors were fetched one repo at a time — up to
+            # ~100 serial GitHub round-trips, the enrichment latency killer.
+            # Fan them out; total request count is unchanged. Ceiling is 10
+            # concurrent requests — raise it only if GITHUB_TOKEN headroom allows.
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                contributors_per_repo = list(
+                    executor.map(
+                        lambda repo: fetch_repo_contributors(
+                            username, repo.get("name")
+                        ),
+                        candidate_repos,
+                    )
+                )
+
             projects = []
-            for repo in repos_data:
-                if repo.get("fork") and repo.get("forks_count", 0) < 5:
-                    continue
-
-                repo_name = repo.get("name")
-
-                contributors_data = fetch_repo_contributors(username, repo_name)
+            for repo, contributors_data in zip(candidate_repos, contributors_per_repo):
                 contributor_count = len(contributors_data)
 
                 user_contributions, total_contributions = fetch_contributions_count(

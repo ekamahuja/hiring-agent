@@ -10,9 +10,11 @@ that touches the network. Required fields absent => `ScrapeError` (markup drift
 or a login wall), never a silently-empty JobPosting.
 """
 
+import os
 import re
 import time
 import logging
+import itertools
 from urllib.parse import urlparse, quote_plus
 
 from scrapling.parser import Selector
@@ -28,6 +30,19 @@ JOB_VIEW_URL = "https://www.linkedin.com/jobs/view/{job_id}"
 SCRAPE_TIMEOUT = 20  # seconds per request
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 2.0  # seconds; *2^attempt
+
+# ponytail: single-IP scraping caps out fast — LinkedIn 429s by IP, not by
+# request count, so raising concurrency alone just hits the wall harder. Set
+# LINKEDIN_PROXIES=url1,url2,... (http://user:pass@host:port) to spread requests
+# across egress IPs — *that's* what lets you scrape more. Empty = direct
+# connection (unchanged). Round-robin cycle; next() is atomic under the GIL, so
+# no lock. Per-proxy health/eviction only if a dead proxy in the pool bites.
+_PROXIES = [p.strip() for p in os.getenv("LINKEDIN_PROXIES", "").split(",") if p.strip()]
+_proxy_cycle = itertools.cycle(_PROXIES) if _PROXIES else None
+
+
+def _next_proxy() -> str | None:
+    return next(_proxy_cycle) if _proxy_cycle else None
 
 
 class ScrapeError(Exception):
@@ -174,12 +189,19 @@ class LinkedInScraper:
         ponytail: Fetcher (curl_cffi TLS impersonation, no browser). If LinkedIn
         starts blocking this, switch to StealthyFetcher (Camoufox) — needs
         `pip install "scrapling[fetchers]"` + `scrapling install` for the browser.
+        Rotates egress IP per request when LINKEDIN_PROXIES is set (see above).
         """
         from scrapling.fetchers import Fetcher  # heavy import; only on real fetch
 
         last_status = None
         for attempt in range(_MAX_RETRIES):
-            resp = Fetcher.get(url, stealthy_headers=True, timeout=SCRAPE_TIMEOUT)
+            proxy = _next_proxy()
+            resp = Fetcher.get(
+                url,
+                stealthy_headers=True,
+                timeout=SCRAPE_TIMEOUT,
+                **({"proxy": proxy} if proxy else {}),
+            )
             status = getattr(resp, "status", 200)
             last_status = status
             if status == 404:
