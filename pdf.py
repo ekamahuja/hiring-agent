@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import logging
+import threading
 import pymupdf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -21,7 +22,11 @@ from models import (
     ProjectsSection,
     AwardsSection,
 )
-from llm_utils import initialize_llm_provider, extract_json_from_response
+from llm_utils import (
+    initialize_llm_provider,
+    extract_json_from_response,
+    _isolate_json_object,
+)
 from pymupdf4llm import to_markdown
 from typing import List, Optional, Dict, Any
 from prompt import (
@@ -113,11 +118,9 @@ class PDFHandler:
             response_text = response["message"]["content"]
 
             try:
-                response_text = extract_json_from_response(response_text)
-                json_start = response_text.find("{")
-                json_end = response_text.rfind("}")
-                if json_start != -1 and json_end != -1:
-                    response_text = response_text[json_start : json_end + 1]
+                response_text = _isolate_json_object(
+                    extract_json_from_response(response_text)
+                )
                 parsed_data = json.loads(response_text)
                 logger.debug(f"✅ Successfully extracted {section_name} section")
 
@@ -292,13 +295,22 @@ class PDFHandler:
         }
 
         # ponytail: run the 6 independent section calls concurrently instead of
-        # sequentially — cuts a cold Gemini run ~5x. Ceiling is 6 concurrent
-        # calls; overall request concurrency is capped by the API-layer semaphore.
-        with ThreadPoolExecutor(max_workers=len(sections)) as executor:
+        # sequentially — cuts a cold Gemini run ~5x. The global LLM cap lives in
+        # models._LLM_SEMAPHORE (crosses thread boundaries), so fanning out here
+        # can't blow the Gemini quota. On the first failed section we abort:
+        # cancel any not-yet-started calls and don't block waiting on the doomed
+        # siblings whose results we'd only discard.
+        cancel = threading.Event()
+
+        def extract(section_name):
+            if cancel.is_set():
+                return None
+            return self._extract_section_data(text_content, section_name)
+
+        executor = ThreadPoolExecutor(max_workers=len(sections))
+        try:
             future_to_section = {
-                executor.submit(
-                    self._extract_section_data, text_content, section_name
-                ): section_name
+                executor.submit(extract, section_name): section_name
                 for section_name in sections
             }
             for future in as_completed(future_to_section):
@@ -311,7 +323,10 @@ class PDFHandler:
                     logger.error(
                         f"⚠️ Failed to extract {section_name} section. Aborting extraction to prevent partial/invalid resume data."
                     )
+                    cancel.set()
                     return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         try:
             if complete_resume.get("basics") and isinstance(

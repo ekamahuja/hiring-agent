@@ -1,6 +1,17 @@
+import os
+import threading
 from typing import List, Optional, Dict, Tuple, Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
+
+# ponytail: the real global cap on in-flight LLM calls. app.py's asyncio.Semaphore
+# can't reach into ThreadPoolExecutor worker threads (pdf.py fans 6 section calls
+# out per extraction), so the cap has to sit at the one choke every provider call
+# crosses. A threading.BoundedSemaphore throttles across async tasks AND pool
+# threads alike. Same env var as app.py so both agree on the number.
+_LLM_SEMAPHORE = threading.BoundedSemaphore(
+    int(os.getenv("MAX_CONCURRENT_EXTRACTIONS", "4"))
+)
 
 
 class ModelProvider(Enum):
@@ -347,7 +358,8 @@ class OllamaProvider:
         if "format" in kwargs:
             chat_params["format"] = kwargs["format"]
 
-        return self.client.chat(**chat_params)
+        with _LLM_SEMAPHORE:
+            return self.client.chat(**chat_params)
 
 
 class GeminiProvider:
@@ -415,8 +427,11 @@ class GeminiProvider:
 
         for attempt in range(MAX_RETRIES):
             try:
-                # Send the chat request
-                response = gemini_model.generate_content(gemini_messages)
+                # Send the chat request. Hold a global slot only for the call
+                # itself — backoff sleeps below release it so a rate-limited
+                # request doesn't idle a concurrency slot for up to 2 minutes.
+                with _LLM_SEMAPHORE:
+                    response = gemini_model.generate_content(gemini_messages)
 
                 # Convert Gemini response to Ollama-like format for compatibility
                 return {"message": {"role": "assistant", "content": response.text}}

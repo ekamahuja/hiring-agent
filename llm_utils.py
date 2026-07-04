@@ -38,7 +38,19 @@ def structured_chat(
         },
         format=schema,
     )
-    return json.loads(extract_json_from_response(response["message"]["content"]))
+    content = extract_json_from_response(response["message"]["content"])
+    return json.loads(_isolate_json_object(content))
+
+
+def _isolate_json_object(text: str) -> str:
+    """Trim anything outside the outermost ``{...}`` so json.loads doesn't choke
+    on explanatory text/metadata the model appends after the closing brace.
+
+    No brace pair -> return unchanged and let json.loads raise a clear error.
+    Object-only: a caller wanting a top-level JSON array must not use this.
+    """
+    start, end = text.find("{"), text.rfind("}")
+    return text[start : end + 1] if start != -1 and end > start else text
 
 
 def extract_json_from_response(response_text: str) -> str:
