@@ -315,7 +315,14 @@ class PDFHandler:
             }
             for future in as_completed(future_to_section):
                 section_name = future_to_section[future]
-                section_data = future.result()
+                try:
+                    section_data = future.result()
+                except Exception as e:
+                    logger.error(
+                        f"⚠️ Unexpected error extracting {section_name} section: {e}. Aborting extraction to prevent partial/invalid resume data."
+                    )
+                    cancel.set()
+                    return None
                 if section_data:
                     complete_resume.update(section_data)
                     logger.debug(f"✅ Successfully extracted {section_name} section")
