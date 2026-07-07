@@ -1,4 +1,5 @@
 import os
+import logging
 import threading
 from typing import List, Optional, Dict, Tuple, Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, field_validator
@@ -12,6 +13,8 @@ from enum import Enum
 _LLM_SEMAPHORE = threading.BoundedSemaphore(
     int(os.getenv("MAX_CONCURRENT_EXTRACTIONS", "4"))
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ModelProvider(Enum):
@@ -340,6 +343,8 @@ class OllamaProvider:
 
         # remove steam from ollama options
         ollama_options.pop("stream", None)
+        # Gemini-only knob — not an Ollama option
+        ollama_options.pop("thinking_budget", None)
 
         # Add num_ctx 32K context window to options
         ollama_options["num_ctx"] = 32768
@@ -363,13 +368,12 @@ class OllamaProvider:
 
 
 class GeminiProvider:
-    """Google Gemini API provider implementation."""
+    """Google Gemini API provider implementation (google-genai SDK)."""
 
     def __init__(self, api_key: str):
-        import google.generativeai as genai
+        from google import genai
 
-        genai.configure(api_key=api_key)
-        self.client = genai
+        self.client = genai.Client(api_key=api_key)
 
     def chat(
         self,
@@ -382,48 +386,50 @@ class GeminiProvider:
         import re
         import time
         import random
-        from google.api_core.exceptions import ResourceExhausted
+        from google.genai import errors
 
         MAX_RETRIES = 5
         BASE_DELAY = 10.0  # seconds — base for exponential backoff
         MAX_DELAY = 120.0  # cap so we never wait more than 2 minutes
 
-        # Map options to Gemini parameters
-        generation_config = {}
+        # Map options to Gemini generation config
+        config: Dict[str, Any] = {}
         if options:
             if "temperature" in options:
-                generation_config["temperature"] = options["temperature"]
+                config["temperature"] = options["temperature"]
             if "top_p" in options:
-                generation_config["top_p"] = options["top_p"]
+                config["top_p"] = options["top_p"]
+            # thinking_budget=0 disables Gemini's hidden reasoning pass —
+            # 2.5-flash thinks by default and spends 3-4x the output tokens
+            # doing it. Callers that want speed over deliberation (the
+            # generator) set it; extraction/scoring keep the default.
+            if options.get("thinking_budget") is not None:
+                config["thinking_config"] = {
+                    "thinking_budget": options["thinking_budget"]
+                }
         # A `format` schema means the caller wants structured JSON. Force valid
         # JSON output so we don't depend on prompt-wishing + markdown stripping.
         # ponytail: response_mime_type guarantees parseable JSON; passing the
         # pydantic schema as response_schema needs $ref flattening first — add
         # that only if the model ever returns valid-JSON-but-wrong-shape.
         if kwargs.get("format"):
-            generation_config["response_mime_type"] = "application/json"
+            config["response_mime_type"] = "application/json"
 
-        # Gemini has a dedicated system slot. The old code folded the system
-        # turn in as a "model" message — telling Gemini it had authored the
-        # instructions itself. Pull system turns out into system_instruction.
+        # Gemini has a dedicated system slot — pull system turns out of the
+        # message list into system_instruction.
         system_instruction = (
             "\n\n".join(m["content"] for m in messages if m["role"] == "system") or None
         )
-        gemini_messages = [
+        if system_instruction:
+            config["system_instruction"] = system_instruction
+        contents = [
             {
                 "role": "user" if m["role"] == "user" else "model",
-                "parts": [m["content"]],
+                "parts": [{"text": m["content"]}],
             }
             for m in messages
             if m["role"] != "system"
         ]
-
-        # Create a Gemini model
-        gemini_model = self.client.GenerativeModel(
-            model_name=model,
-            generation_config=generation_config,
-            system_instruction=system_instruction,
-        )
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -431,20 +437,24 @@ class GeminiProvider:
                 # itself — backoff sleeps below release it so a rate-limited
                 # request doesn't idle a concurrency slot for up to 2 minutes.
                 with _LLM_SEMAPHORE:
-                    response = gemini_model.generate_content(gemini_messages)
+                    response = self.client.models.generate_content(
+                        model=model, contents=contents, config=config
+                    )
 
                 # Convert Gemini response to Ollama-like format for compatibility
                 return {"message": {"role": "assistant", "content": response.text}}
 
-            except ResourceExhausted as e:
-                if attempt == MAX_RETRIES - 1:
-                    # All retries exhausted — re-raise the original exception.
+            except errors.APIError as e:
+                if e.code != 429 or attempt == MAX_RETRIES - 1:
+                    # Not a rate limit, or all retries exhausted — re-raise.
                     # This surfaces unrecoverable quota errors (RPD, TPM, etc.)
                     # instead of silently failing or returning bad data.
                     raise
 
                 # Parse the API-suggested retry delay from the error message
-                match = re.search(r"retry[_ ]in\s+([\d.]+)s", str(e), re.IGNORECASE)
+                match = re.search(
+                    r"retry_?delay\D*?([\d.]+)s", str(e), re.IGNORECASE
+                )
                 api_hint = float(match.group(1)) if match else None
 
                 # Exponential backoff: BASE_DELAY * 2^attempt, capped at MAX_DELAY
@@ -456,10 +466,11 @@ class GeminiProvider:
                 # Add ±20% randomized jitter to avoid thundering herd
                 sleep_time = round(delay * random.uniform(0.8, 1.2), 2)
 
-                print(
-                    f"[GeminiProvider] Rate limit hit "
-                    f"(attempt {attempt + 1}/{MAX_RETRIES}). "
-                    f"Retrying in {sleep_time}s..."
+                logger.warning(
+                    "GeminiProvider rate limit hit (attempt %d/%d), retrying in %ss",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    sleep_time,
                 )
                 time.sleep(sleep_time)
 

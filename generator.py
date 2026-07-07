@@ -51,6 +51,10 @@ class DocumentGenerator:
         self.model_params = model_params or MODEL_PARAMETERS.get(
             model_name, {"temperature": 0.4, "top_p": 0.9}
         )
+        # Prose drafting needs no hidden deliberation: Gemini 2.5-flash thinks
+        # by default and spends 3-4x the output tokens (and ~3x the latency)
+        # doing it. Measured: both-docs generation 11-14s -> ~4s at budget 0.
+        self.model_params = {**self.model_params, "thinking_budget": 0}
         self.template_manager = TemplateManager()
         self.provider = initialize_llm_provider(self.model_name)
 

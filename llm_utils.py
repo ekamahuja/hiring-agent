@@ -35,6 +35,8 @@ def structured_chat(
             "stream": False,
             "temperature": params.get("temperature", 0.3),
             "top_p": params.get("top_p", 0.9),
+            # None means "provider default" (Gemini 2.5 thinks unless told not to)
+            "thinking_budget": params.get("thinking_budget"),
         },
         format=schema,
     )
